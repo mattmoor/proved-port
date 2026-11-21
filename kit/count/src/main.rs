@@ -9403,6 +9403,35 @@ mod tests {
             let got = cfg_built(cfg, &runs);
             assert_eq!(got, Ok(want), "{cfg}: got = {got:?}, wanted = {want:?}");
         }
+        // In a module, each run that may compile the module must be sure
+        // to compile the item there.
+        let s = |v: &[&str]| v.iter().map(|p| (*p).to_owned()).collect::<Vec<_>>();
+        for (shared, own, want) in [
+            (&[][..], &["target_arch = \"x86_64\""][..], false),
+            (
+                &["target_arch = \"x86_64\""][..],
+                &["target_arch = \"x86_64\""][..],
+                true,
+            ),
+            (&["target_arch = \"x86_64\""][..], &["unix"][..], false),
+            (
+                &["target_arch = \"x86_64\""][..],
+                &["not (target_arch = \"aarch64\")"][..],
+                true,
+            ),
+            (
+                &["not (loom)"][..],
+                &["any (target_arch = \"x86_64\" , target_arch = \"aarch64\")"][..],
+                true,
+            ),
+        ] {
+            let got = every_run_sure(&s(shared), &s(own), &runs);
+            assert_eq!(
+                got,
+                Ok(want),
+                "{shared:?} {own:?}: got = {got:?}, wanted = {want}"
+            );
+        }
     }
 
     fn test_util() -> Vec<String> {
