@@ -1373,6 +1373,132 @@ home = "crates/pcre2-capi/src/object.rs"
     /// `verus_features` name, a `verus_sets` or `verus_never_sets` atom,
     /// or a `stand_ins` pair, each names what it turned off. Removing or
     /// respacing a `verus_sets` or `verus_never_sets` atom is not.
+    /// `[[runs]]` (#21): two runs read, each with its own atoms, and the
+    /// shorthand is their one run, `verus`. Negative: a run beside the
+    /// shorthand, without a name, named twice, with an entry that is not
+    /// one atom, settled already, or named twice in it, is refused.
+    #[test]
+    fn proof_runs_read_and_bad_runs_fail() {
+        const RUNS: &str = "[crates]\ndir = \"c\"\n\
+            [[runs]]\nname = \"verus\"\nsets = ['target_arch = \"x86_64\"']\nnever_sets = [\"loom\"]\n\
+            [[runs]]\nname = \"verus-arm64\"\nsets = ['target_arch = \"aarch64\"']\n";
+        let c = Config::parse(RUNS).expect("parses");
+        assert_eq!(
+            c.proof_runs(),
+            vec![
+                (
+                    "verus".to_owned(),
+                    vec!["target_arch=\"x86_64\"".to_owned()],
+                    vec!["loom".to_owned()],
+                ),
+                (
+                    "verus-arm64".to_owned(),
+                    vec!["target_arch=\"aarch64\"".to_owned()],
+                    vec![],
+                ),
+            ]
+        );
+        let short = Config::parse("[crates]\ndir = \"c\"\nverus_never_sets = [\"miri\"]\n")
+            .expect("parses");
+        assert_eq!(
+            short.proof_runs(),
+            vec![("verus".to_owned(), vec![], vec!["miri".to_owned()])]
+        );
+        for (text, want) in [
+            (
+                "[crates]\ndir = \"c\"\nverus_sets = [\"unix\"]\n[[runs]]\nname = \"a\"\n",
+                "both name the proof runs' atoms",
+            ),
+            (
+                "[crates]\ndir = \"c\"\n[[runs]]\nname = \" \"\n",
+                "needs a name",
+            ),
+            (
+                "[crates]\ndir = \"c\"\n[[runs]]\nname = \"a\"\n[[runs]]\nname = \"a\"\n",
+                "names the run \"a\" twice",
+            ),
+            (
+                "[crates]\ndir = \"c\"\n[[runs]]\nname = \"a\"\nsets = [\"all(unix)\"]\n",
+                "is not one cfg atom",
+            ),
+            (
+                "[crates]\ndir = \"c\"\n[[runs]]\nname = \"a\"\nnever_sets = [\"test\"]\n",
+                "is already a test atom",
+            ),
+            (
+                "[crates]\ndir = \"c\"\n[[runs]]\nname = \"a\"\nsets = [\"verus_keep_ghost\"]\n",
+                "is already a Verus atom",
+            ),
+            (
+                "[crates]\ndir = \"c\"\n[[runs]]\nname = \"a\"\nsets = [\"unix\"]\nnever_sets = [\"unix\"]\n",
+                "is already in its sets",
+            ),
+            (
+                "[crates]\ndir = \"c\"\n[[runs]]\nname = \"a\"\nsetz = [\"unix\"]\n",
+                "unknown field",
+            ),
+        ] {
+            let got = Config::parse(text).map(|_| ()).unwrap_err();
+            assert!(got.contains(want), "{text:?}: got = {got}, want = {want}");
+        }
+        // Two runs may each set an atom: it is one run's, not both's.
+        Config::parse(
+            "[crates]\ndir = \"c\"\n[[runs]]\nname = \"a\"\nsets = [\"unix\"]\n[[runs]]\nname = \"b\"\nsets = [\"unix\"]\n",
+        )
+        .expect("parses");
+    }
+
+    /// Under `--base-rev`, a run added or renamed, or an atom added to a
+    /// run, is a narrowing (#21); the shorthand is the base's one run,
+    /// `verus`. Removing an atom or a run is not.
+    #[test]
+    fn a_run_added_or_widened_is_a_narrowing() {
+        const BASE: &str = "[crates]\ndir = \"c\"\n\
+            [[runs]]\nname = \"verus\"\nsets = ['target_arch = \"x86_64\"']\nnever_sets = [\"loom\"]\n";
+        let shown = |head: &str, base: &str| {
+            Config::parse(head)
+                .expect("parses")
+                .narrowed_from(&Config::parse(base).expect("parses"))
+                .iter()
+                .map(ToString::to_string)
+                .collect::<Vec<_>>()
+                .join("\n")
+        };
+        assert_eq!(shown(BASE, BASE), "");
+        assert_eq!(
+            shown(
+                &BASE.replace("sets = ['target_arch = \"x86_64\"']\n", ""),
+                BASE
+            ),
+            ""
+        );
+        for (head, base, want) in [
+            (
+                format!("{BASE}[[runs]]\nname = \"verus-arm64\"\n"),
+                BASE.to_owned(),
+                "[[runs]] adds the run \"verus-arm64\"",
+            ),
+            (
+                BASE.replace("name = \"verus\"", "name = \"verus-x86\""),
+                BASE.to_owned(),
+                "[[runs]] adds the run \"verus-x86\"",
+            ),
+            (
+                BASE.replace("[\"loom\"]", "[\"loom\", \"miri\"]"),
+                BASE.to_owned(),
+                "run \"verus\" never_sets adds \"miri\"",
+            ),
+            (
+                BASE.to_owned(),
+                "[crates]\ndir = \"c\"\nverus_never_sets = [\"loom\"]\n".to_owned(),
+                "run \"verus\" sets adds \"target_arch=\\\"x86_64\\\"\"",
+            ),
+        ] {
+            let got = shown(&head, &base);
+            assert!(got.contains(want), "{head:?}: got = {got}, want = {want}");
+        }
+    }
+
     #[test]
     fn a_gate_removed_or_narrowed_since_the_base_fails() {
         let shown = |n: &[Narrowing]| n.iter().map(ToString::to_string).collect::<Vec<_>>();
