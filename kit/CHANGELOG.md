@@ -38,8 +38,9 @@ where it reports drift.
   several hosts is counted run by run. `[crates] verus_sets` and
   `verus_never_sets` stay as one run's shorthand and cannot sit beside
   `[[runs]]`. A port with no `[[runs]]` counts as it did. Under
-  `--base-rev`, a run added or renamed, or an atom added to a run, is a
-  narrowing.
+  `--base-rev`, a run added, removed or renamed, or an atom added to a
+  run, is a narrowing. A run may set only one value of each
+  single-valued key (`target_arch`, `target_os`, ...).
 
 ### Porting notes
 

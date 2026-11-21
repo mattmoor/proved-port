@@ -501,6 +501,20 @@ impl Config {
                     if let Some((_, was)) = seen.iter().find(|(s, _)| *s == a) {
                         return Err(format!("run {name:?} {key} entry {n:?} is already {was}"));
                     }
+                    // A run is one target: it sets one value of a key
+                    // rustc gives each target one value of.
+                    if key == "sets"
+                        && let Some((k, _)) = a.split_once('=')
+                        && crate::SINGLE_VALUED.contains(&k)
+                        && r.sets
+                            .iter()
+                            .filter_map(|s| atom(s))
+                            .any(|s| s != a && s.split_once('=').is_some_and(|(sk, _)| sk == k))
+                    {
+                        return Err(format!(
+                            "run {name:?} sets two values of {k}, which a target has one of: declare a run per target"
+                        ));
+                    }
                     seen.push((a, what));
                 }
             }
@@ -769,7 +783,19 @@ impl Config {
         // shorthand is its one run, `verus`.
         if !self.runs.is_empty() || !base.runs.is_empty() {
             let there = base.proof_runs();
-            for (name, sets, never) in self.proof_runs() {
+            let here = self.proof_runs();
+            // A run removed may be the one where an item was unsure, so
+            // its other runs then verify it.
+            for (name, _, _) in there
+                .iter()
+                .filter(|(n, _, _)| here.iter().all(|(h, _, _)| h != n))
+            {
+                push(
+                    format!("[[runs]] removes the run {name:?}"),
+                    "so the functions only it left unsure may count as verified",
+                );
+            }
+            for (name, sets, never) in here {
                 let Some((_, bs, bn)) = there.iter().find(|(n, _, _)| *n == name) else {
                     push(
                         format!("[[runs]] adds the run {name:?}"),
@@ -1437,6 +1463,10 @@ home = "crates/pcre2-capi/src/object.rs"
                 "[crates]\ndir = \"c\"\n[[runs]]\nname = \"a\"\nsetz = [\"unix\"]\n",
                 "unknown field",
             ),
+            (
+                "[crates]\ndir = \"c\"\n[[runs]]\nname = \"a\"\nsets = ['target_arch = \"x86_64\"', 'target_arch = \"aarch64\"']\n",
+                "sets two values of target_arch",
+            ),
         ] {
             let got = Config::parse(text).map(|_| ()).unwrap_err();
             assert!(got.contains(want), "{text:?}: got = {got}, want = {want}");
@@ -1448,9 +1478,9 @@ home = "crates/pcre2-capi/src/object.rs"
         .expect("parses");
     }
 
-    /// Under `--base-rev`, a run added or renamed, or an atom added to a
-    /// run, is a narrowing (#21); the shorthand is the base's one run,
-    /// `verus`. Removing an atom or a run is not.
+    /// Under `--base-rev`, a run added, removed or renamed, or an atom
+    /// added to a run, is a narrowing (#21); the shorthand is the base's
+    /// one run, `verus`. Removing an atom is not.
     #[test]
     fn a_run_added_or_widened_is_a_narrowing() {
         const BASE: &str = "[crates]\ndir = \"c\"\n\
@@ -1487,6 +1517,16 @@ home = "crates/pcre2-capi/src/object.rs"
                 BASE.replace("[\"loom\"]", "[\"loom\", \"miri\"]"),
                 BASE.to_owned(),
                 "run \"verus\" never_sets adds \"miri\"",
+            ),
+            (
+                BASE.to_owned(),
+                format!("{BASE}[[runs]]\nname = \"verus-arm64\"\n"),
+                "[[runs]] removes the run \"verus-arm64\"",
+            ),
+            (
+                "[crates]\ndir = \"c\"\nverus_never_sets = [\"loom\"]\n".to_owned(),
+                format!("{BASE}[[runs]]\nname = \"verus-arm64\"\n"),
+                "[[runs]] removes the run \"verus-arm64\"",
             ),
             (
                 BASE.to_owned(),

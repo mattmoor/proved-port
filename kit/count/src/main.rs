@@ -50,7 +50,13 @@
 //! configuration settles there are sure: `verus_keep_ghost`, the
 //! Verus-only features, the test-only atoms (never set), and the
 //! `verus_sets` and `verus_never_sets` atoms; a platform such as
-//! `target_os = "windows"`, or any other atom, may be either.
+//! `target_os = "windows"`, or any other atom, may be either. A port
+//! that declares its proof runs (`[[runs]]`, #21) has each run's `sets`
+//! and `never_sets` settle atoms in that run alone, where a set value of
+//! a single-valued key also settles that key's other values as never;
+//! an item is classed in each run, and is verified where it is sure in
+//! some run and unsure in none, so one only one run compiles
+//! (`not(target_arch = "x86_64")` beside an aarch64 run) may be.
 //! Lines run from a function's `fn` keyword to its closing brace.
 //!
 //! cargo verus has Verus check only a package whose Cargo.toml sets

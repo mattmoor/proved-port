@@ -80,7 +80,8 @@ configuration does not compare;
 a `test_cfgs`, `test_features`
 or `verus_features` name added; a `verus_sets` or `verus_never_sets`
 atom added (compared as atoms, so respacing one is not a change); a
-`[[runs]]` run added or renamed, or an atom added to a run (#21); a
+`[[runs]]` run added, removed or renamed, or an atom added to a run
+(#21); a
 `stand_ins` pair added; or a crate
 whose own Cargo.toml gains `publish = false`, where the base read it
 with its Cargo.toml deciding whether it ships (a `dir` crate, or a
@@ -343,10 +344,12 @@ any(target_arch = "aarch64", unix))` is trusted (the x86_64 run compiles
 it only under `unix`, which it does not settle). An item in a module is
 sure only if each run that may compile the module is sure to compile
 the item there. A run with no name, a name given twice, an entry that is
-not one atom or is settled already, or `[[runs]]` beside `verus_sets` or
-`verus_never_sets`, fails the run (exit 2). Under `--base-rev`, a run
-added or renamed, or an atom added to a run, is a narrowing; the base's
-shorthand is its one run, `verus`.
+not one atom or is settled already, a run that sets two values of one
+single-valued key (a run is one target), or `[[runs]]` beside
+`verus_sets` or `verus_never_sets`, fails the run (exit 2). Under
+`--base-rev`, a run added, removed or renamed (a run removed may be the
+one where an item was unsure), or an atom added to a run, is a
+narrowing; the base's shorthand is its one run, `verus`.
 
 Without `[[runs]]`, a port that runs Verus on several hosts names every
 run's atoms in the shorthand (challoc, which runs it on x86_64 and
