@@ -514,17 +514,74 @@ struct Atoms {
     verus: Vec<String>,
     sets: Vec<String>,
     never: Vec<String>,
+    /// Each declared proof run's `(sets, never)` (`[[runs]]`, #21), whose
+    /// classes [`verus_can`] combines; empty without `[[runs]]`, when
+    /// `sets` and `never` are the one run's.
+    runs: Vec<(Vec<String>, Vec<String>)>,
+    /// Whether `sets` and `never` are one declared run's ([`Atoms::each_run`]),
+    /// so a value of a single-valued key `sets` holds rules out the key's
+    /// other values. The shorthand may hold several runs' values, so it
+    /// does not.
+    one_run: bool,
 }
 
 impl Atoms {
     fn of(c: &Config) -> Atoms {
+        let runs = if c.runs.is_empty() {
+            Vec::new()
+        } else {
+            c.proof_runs().into_iter().map(|(_, s, n)| (s, n)).collect()
+        };
         Atoms {
             test: c.test_atoms(),
             verus: c.verus_atoms(),
             sets: c.verus_set_atoms(),
             never: c.verus_never_atoms(),
+            runs,
+            one_run: false,
         }
     }
+
+    /// Each proof run's atoms, as one-run [`Atoms`]: the declared runs, or
+    /// these atoms themselves without any.
+    fn each_run(&self) -> Vec<Atoms> {
+        if self.runs.is_empty() {
+            return vec![self.clone()];
+        }
+        self.runs
+            .iter()
+            .map(|(sets, never)| Atoms {
+                test: self.test.clone(),
+                verus: self.verus.clone(),
+                sets: sets.clone(),
+                never: never.clone(),
+                runs: Vec::new(),
+                one_run: true,
+            })
+            .collect()
+    }
+}
+
+/// [`Can`] for the predicate `p` across the proof runs (#21): without
+/// `[[runs]]`, [`cfg_eval`] in Verus's build. With them, `p` is classed in
+/// each run, and it can be true where some run may compile it, and can be
+/// false unless it is sure in some run and unsure in none, so `t && !f`
+/// reads "verified": every run that might ship it also verifies it.
+fn verus_can(p: &str, atoms: &Atoms) -> Result<Can, String> {
+    if atoms.runs.is_empty() {
+        return cfg_eval(p, true, atoms);
+    }
+    let (mut t, mut sure, mut unsure) = (false, false, false);
+    for run in atoms.each_run() {
+        let c = cfg_eval(p, true, &run)?;
+        t |= c.t;
+        sure |= c.t && !c.f;
+        unsure |= c.t && c.f;
+    }
+    Ok(Can {
+        t,
+        f: unsure || !sure,
+    })
 }
 
 impl Counter {
@@ -1743,9 +1800,26 @@ fn cfg_eval(p: &str, verus: bool, atoms: &Atoms) -> Result<Can, String> {
         Can { t: true, f: false }
     } else if verus && atoms.never.contains(&w) {
         Can { t: false, f: true }
+    } else if verus && atoms.one_run && other_value_set(&w, &atoms.sets) {
+        // One declared run (#21) sets one value of a single-valued key,
+        // so every other value of it is false there.
+        Can { t: false, f: true }
     } else {
         Can { t: true, f: true }
     })
+}
+
+/// Whether `sets` holds another value of the single-valued key
+/// ([`SINGLE_VALUED`]) of the atom `w` (`target_arch="aarch64"` for
+/// `target_arch="x86_64"`), both without whitespace.
+fn other_value_set(w: &str, sets: &[String]) -> bool {
+    let Some((k, _)) = w.split_once('=') else {
+        return false;
+    };
+    SINGLE_VALUED.contains(&k)
+        && sets
+            .iter()
+            .any(|s| s.as_str() != w && s.split_once('=').is_some_and(|(sk, _)| sk == k))
 }
 
 /// The `cfg` keys rustc gives exactly one value per target (`rustc --print
@@ -1953,7 +2027,7 @@ fn cfg_args(inner: &str) -> Result<Vec<&str>, String> {
 /// Verus's build: only the atoms the configuration settles there are sure,
 /// and only one run's of them at a time ([`names_several_runs`]).
 fn cfg_built(tokens: &str, atoms: &Atoms) -> Result<Built, String> {
-    let verus = cfg_eval(tokens, true, atoms)?;
+    let verus = verus_can(tokens, atoms)?;
     Ok(if cfg_eval(tokens, false, atoms)?.t {
         if verus.f || names_several_runs(tokens, atoms)? {
             Built::Unsure
@@ -2062,7 +2136,7 @@ fn guarded_verus_sure(guards: &[String], atoms: &Atoms) -> Result<bool, String> 
         return Ok(true);
     }
     let all = format!("all({})", guards.join(","));
-    let can = cfg_eval(&all, true, atoms)?;
+    let can = verus_can(&all, atoms)?;
     Ok(can.t && !can.f && !names_several_runs(&all, atoms)?)
 }
 
@@ -2086,6 +2160,23 @@ fn every_run_sure(shared: &[String], own: &[String], atoms: &Atoms) -> Result<bo
         return Ok(false);
     }
     if own.is_empty() {
+        return Ok(true);
+    }
+    // With [[runs]] declared (#21), each run that may compile the module
+    // must be sure to compile the item there: `own` holds wherever
+    // `shared` does, in that run's atoms.
+    if !atoms.runs.is_empty() {
+        let own = all_of(own);
+        let implied = match shared {
+            [] => own,
+            _ => format!("any(not({}),{own})", all_of(shared)),
+        };
+        for run in atoms.each_run() {
+            let can = cfg_eval(&implied, true, &run)?;
+            if can.f {
+                return Ok(false);
+            }
+        }
         return Ok(true);
     }
     let key = |a: &str| a.split_once('=').map(|(k, _)| k.to_owned());
@@ -2395,7 +2486,7 @@ fn verus_attribute(
         let mut all = guards.to_vec();
         all.extend(preds);
         let all = format!("all({})", all.join(","));
-        let can = cfg_eval(&all, true, atoms)?;
+        let can = verus_can(&all, atoms)?;
         if can.t && !can.f && !names_several_runs(&all, atoms)? {
             return Ok(Some(true));
         }
@@ -5528,12 +5619,16 @@ fn bindings_in(items: &[Item], at: &BindAt, atoms: &Atoms, out: &mut Vec<Binding
         };
         let mut guards = at.guards.clone();
         guards.extend(cfg_predicates(attrs));
-        let sees = |verus: bool| {
+        let sees = |verus: bool, atoms: &Atoms| {
             guards
                 .iter()
                 .all(|p| cfg_eval(p, verus, atoms).map_or(true, |c| c.t))
         };
-        let (shipped, verus) = (sees(false), sees(true));
+        // Verus sees it where some proof run may (#21).
+        let (shipped, verus) = (
+            sees(false, atoms),
+            atoms.each_run().iter().any(|r| sees(true, r)),
+        );
         let base = Binding {
             module: at.module.clone(),
             shipped,
@@ -9257,6 +9352,56 @@ mod tests {
             verus: vec!["verus_keep_ghost".into(), "feature=\"verus\"".into()],
             sets: vec!["feature=\"jit\"".into()],
             never: vec!["miri".into()],
+            runs: Vec::new(),
+            one_run: false,
+        }
+    }
+
+    /// challoc's two runs declared as `[[runs]]` (#21): x86_64 and
+    /// aarch64, each never setting `loom`.
+    fn two_runs() -> Atoms {
+        Atoms::of(
+            &Config::parse(
+                "[crates]\ndir = \"crates\"\n\
+                 [[runs]]\nname = \"verus\"\nsets = ['target_arch = \"x86_64\"']\nnever_sets = [\"loom\"]\n\
+                 [[runs]]\nname = \"verus-arm64\"\nsets = ['target_arch = \"aarch64\"']\nnever_sets = [\"loom\"]\n",
+            )
+            .expect("parses"),
+        )
+    }
+
+    /// #21's table: an item is classed in each run, verified where it is
+    /// sure in some run and unsure in none, trusted where some run may
+    /// ship it unchecked, and left out where no build compiles it.
+    #[test]
+    fn per_run_atoms_class_run_by_run() {
+        let runs = two_runs();
+        for (cfg, want) in [
+            ("target_arch = \"x86_64\"", Built::Shipped),
+            ("target_arch = \"aarch64\"", Built::Shipped),
+            // Never in the x86_64 run, sure in the aarch64 one: verified
+            // (trusted under the shorthand).
+            ("not (target_arch = \"x86_64\")", Built::Shipped),
+            (
+                "all (target_arch = \"x86_64\" , any (target_arch = \"aarch64\" , unix))",
+                Built::Unsure,
+            ),
+            (
+                "all (target_arch = \"x86_64\" , target_arch = \"aarch64\")",
+                Built::Test,
+            ),
+            // Sure in one run, never in the other: verified.
+            (
+                "any (target_arch = \"x86_64\" , target_arch = \"aarch64\")",
+                Built::Shipped,
+            ),
+            // Sure in one run, unsure in the other: trusted.
+            ("any (target_arch = \"x86_64\" , unix)", Built::Unsure),
+            // Never in every run, yet a shipped build may: trusted.
+            ("loom", Built::Unsure),
+        ] {
+            let got = cfg_built(cfg, &runs);
+            assert_eq!(got, Ok(want), "{cfg}: got = {got:?}, wanted = {want:?}");
         }
     }
 
