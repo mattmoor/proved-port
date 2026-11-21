@@ -48,6 +48,25 @@ pub(crate) struct Config {
     /// with its reason ([`Config::explain`]).
     #[serde(default)]
     pub(crate) narrowed: Vec<Narrowed>,
+    /// Each proof run and the atoms it is sure to set or never sets (#21):
+    /// a port that runs Verus on several hosts declares one per host, and
+    /// an item is classed in each run and the classes combined. Without
+    /// it, `[crates] verus_sets` and `verus_never_sets` are one run's.
+    #[serde(default)]
+    pub(crate) runs: Vec<Run>,
+}
+
+/// One proof run (`[[runs]]`, #21): its name, and the `cfg` atoms its
+/// Verus build is sure to set and never sets, written as `[crates]
+/// verus_sets` writes them.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct Run {
+    pub(crate) name: String,
+    #[serde(default)]
+    pub(crate) sets: Vec<String>,
+    #[serde(default)]
+    pub(crate) never_sets: Vec<String>,
 }
 
 /// The crates the counter reads.
@@ -437,7 +456,79 @@ impl Config {
                 seen.push((a, what));
             }
         }
+        self.check_runs()
+    }
+
+    /// Fails on a `[[runs]]` table beside `[crates] verus_sets` or
+    /// `verus_never_sets` (the shorthand is one run's, so the two cannot
+    /// both say what the proof runs set), on a run with no name or a name
+    /// given twice, and on a run's entry that is not one `cfg` atom, that
+    /// the configuration already settles, or that the run names twice.
+    fn check_runs(&self) -> Result<(), String> {
+        if self.runs.is_empty() {
+            return Ok(());
+        }
+        if !self.crates.verus_sets.is_empty() || !self.crates.verus_never_sets.is_empty() {
+            return Err("[[runs]] and [crates] verus_sets or verus_never_sets both name the proof runs' atoms: move the shorthand's atoms into each [[runs]] table".into());
+        }
+        let settled: Vec<(String, &str)> = self
+            .test_atoms()
+            .into_iter()
+            .map(|a| (a, "a test atom"))
+            .chain(self.verus_atoms().into_iter().map(|a| (a, "a Verus atom")))
+            .collect();
+        let mut names: Vec<&str> = Vec::new();
+        for r in &self.runs {
+            let name = r.name.trim();
+            if name.is_empty() {
+                return Err("a [[runs]] table needs a name".into());
+            }
+            if names.contains(&name) {
+                return Err(format!("[[runs]] names the run {name:?} twice"));
+            }
+            names.push(name);
+            let mut seen = settled.clone();
+            for (key, list, what) in [
+                ("sets", &r.sets, "in its sets"),
+                ("never_sets", &r.never_sets, "in its never_sets"),
+            ] {
+                for n in list {
+                    let a = atom(n).ok_or_else(|| {
+                        format!(
+                            "run {name:?} {key} entry {n:?} is not one cfg atom: give a name (`miri`) or `name = \"value\"` (`feature = \"jit\"`)"
+                        )
+                    })?;
+                    if let Some((_, was)) = seen.iter().find(|(s, _)| *s == a) {
+                        return Err(format!("run {name:?} {key} entry {n:?} is already {was}"));
+                    }
+                    seen.push((a, what));
+                }
+            }
+        }
         Ok(())
+    }
+
+    /// Each proof run's name and atoms (`sets`, `never`), as `cfg_eval`
+    /// compares them: the `[[runs]]` tables, or, without any, one run
+    /// named `verus` holding `[crates] verus_sets` and `verus_never_sets`.
+    pub(crate) fn proof_runs(&self) -> Vec<(String, Vec<String>, Vec<String>)> {
+        if self.runs.is_empty() {
+            return vec![(
+                "verus".to_owned(),
+                self.verus_set_atoms(),
+                self.verus_never_atoms(),
+            )];
+        }
+        self.runs
+            .iter()
+            .map(|r| {
+                (
+                    r.name.trim().to_owned(),
+                    r.sets.iter().filter_map(|n| atom(n)).collect(),
+                    r.never_sets.iter().filter_map(|n| atom(n)).collect(),
+                )
+            })
+            .collect()
     }
 
     /// The `cfg` atoms that only Verus's build meets, as `cfg_eval`
@@ -671,6 +762,29 @@ impl Config {
                     format!("[crates] {key} adds {n:?}"),
                     "so the counter takes Verus's build to settle it, and the functions it guards may count as verified",
                 );
+            }
+        }
+        // Per run (#21), once either side declares [[runs]]: a run added
+        // or renamed, or an atom added to a run, is a narrowing. The base's
+        // shorthand is its one run, `verus`.
+        if !self.runs.is_empty() || !base.runs.is_empty() {
+            let there = base.proof_runs();
+            for (name, sets, never) in self.proof_runs() {
+                let Some((_, bs, bn)) = there.iter().find(|(n, _, _)| *n == name) else {
+                    push(
+                        format!("[[runs]] adds the run {name:?}"),
+                        "so the functions only it settles may count as verified",
+                    );
+                    continue;
+                };
+                for (key, here, was) in [("sets", &sets, bs), ("never_sets", &never, bn)] {
+                    for a in here.iter().filter(|a| !was.contains(a)) {
+                        push(
+                            format!("run {name:?} {key} adds {a:?}"),
+                            "so the counter takes that run to settle it, and the functions it guards may count as verified",
+                        );
+                    }
+                }
             }
         }
         for (section, here, there) in [
